@@ -8,6 +8,7 @@
 # - Nivel de servidor (system-wide): archivos en /etc/cloudflared y servicio en /etc/systemd/system/.
 # - Seguridad: la credencial del túnel (<UUID>.json) se guarda con permisos 0600.
 
+---
 - name: Cloudflare Tunnel (system-wide)
   hosts: localhost
   connection: local
@@ -25,34 +26,63 @@
     cloudflared_group: "{{ cloudflared_group | default(cloudflared_user) }}"
 
   tasks:
-    - name: Ensure base packages
+    # ------------------- Fase INSTALL -------------------
+    - name: Ensure base packages (incluye gnupg para dearmorar la llave)
       tags: ["install"]
       apt:
-        name: [ca-certificates, lsb-release]
+        name:
+          - ca-certificates
+          - lsb-release
+          - gnupg
         state: present
         update_cache: yes
 
-    - name: Add Cloudflare APT key
+    - name: Ensure /etc/apt/keyrings exists
       tags: ["install"]
-      apt_key:
-        url: "https://pkg.cloudflare.com/cloudflare-main.gpg"
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Cloudflare repo key (ASCII armored)
+      tags: ["install"]
+      get_url:
+        url: https://pkg.cloudflare.com/cloudflare-main.gpg
+        dest: /etc/apt/keyrings/cloudflared.asc
+        mode: "0644"
+
+    - name: Convert key to GPG keyring (dearmor)
+      tags: ["install"]
+      command: gpg --dearmor -o /etc/apt/keyrings/cloudflared.gpg /etc/apt/keyrings/cloudflared.asc
+      args:
+        creates: /etc/apt/keyrings/cloudflared.gpg
+
+    - name: Add cloudflared deb822 repository with signed_by
+      tags: ["install"]
+      deb822_repository:
+        name: cloudflared
+        types: [deb]
+        uris: https://pkg.cloudflare.com/cloudflared
+        suites: "{{ ansible_distribution_release }}"
+        components: [main]
+        signed_by: /etc/apt/keyrings/cloudflared.gpg
+        enabled: true
         state: present
 
-    - name: Add cloudflared repo
+    - name: Update APT cache after adding repo
       tags: ["install"]
-      apt_repository:
-        repo: "deb https://pkg.cloudflare.com/cloudflared {{ ansible_distribution_release }} main"
-        filename: "cloudflared"
-        state: present
+      apt:
+        update_cache: yes
 
     - name: Install cloudflared
       tags: ["install"]
       apt:
         name: cloudflared
         state: present
-        update_cache: yes
 
-    - name: Ensure config dir exists
+    - name: Ensure {{ cloudflared_conf_dir }} exists
       tags: ["install","configure"]
       file:
         path: "{{ cloudflared_conf_dir }}"
@@ -61,6 +91,7 @@
         group: root
         mode: "0755"
 
+    # ------------------- Fase CONFIGURE -------------------
     - name: Guard required variables
       tags: ["configure"]
       assert:
@@ -68,6 +99,7 @@
           - tunnel_name is defined
           - hostname is defined
           - service_url is defined
+        fail_msg: "Faltan variables requeridas: tunnel_name, hostname, service_url."
 
     - name: Ensure service user/group exist
       tags: ["configure"]
@@ -97,7 +129,8 @@
       shell: |
         set -euo pipefail
         {{ cloudflared_bin }} tunnel list | awk -v name="{{ tunnel_name }}" 'NR>1 && $NF==name {print $1; exit}'
-      args: {executable: /bin/bash}
+      args:
+        executable: /bin/bash
       register: tunnel_id_cmd
       changed_when: false
 
@@ -106,9 +139,9 @@
       assert:
         that:
           - tunnel_id_cmd.stdout is match("^[0-9a-fA-F-]+$")
-        fail_msg: "No se pudo resolver el UUID del túnel '{{ tunnel_name }}'."
+        fail_msg: "No se pudo resolver el UUID del túnel '{{ tunnel_name }}'. Verifica el login y la creación."
 
-    - name: Install tunnel credentials (secure perms)
+    - name: Install tunnel credentials into {{ cloudflared_conf_dir }} (secure)
       tags: ["configure"]
       copy:
         src: "/root/.cloudflared/{{ tunnel_id_cmd.stdout }}.json"
@@ -118,7 +151,7 @@
         mode: "0600"
         remote_src: true
 
-    - name: Render config.yml
+    - name: Render {{ cloudflared_conf_dir }}/config.yml
       tags: ["configure"]
       template:
         src: "files/config.yml.j2"
@@ -132,7 +165,7 @@
         cfg_service_url: "{{ service_url }}"
         cloudflared_conf_dir: "{{ cloudflared_conf_dir }}"
 
-    - name: Install systemd unit
+    - name: Install systemd unit for cloudflared
       tags: ["configure"]
       template:
         src: "files/cloudflared.service.j2"
@@ -146,7 +179,7 @@
         cloudflared_user: "{{ cloudflared_user }}"
         cloudflared_group: "{{ cloudflared_group }}"
 
-    - name: Reload systemd
+    - name: Reload systemd daemon
       tags: ["configure"]
       systemd:
         daemon_reload: true
@@ -158,13 +191,13 @@
         enabled: true
       when: enable_autostart
 
-    - name: Start/restart service
+    - name: Start (or restart) cloudflared service now
       tags: ["configure"]
       systemd:
         name: cloudflared
         state: restarted
 
-    - name: Ensure DNS route
+    - name: Create/ensure DNS route for the tunnel
       tags: ["configure"]
       command: "{{ cloudflared_bin }} tunnel route dns {{ tunnel_name }} {{ hostname }}"
       register: dns_route
