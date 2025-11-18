@@ -1,85 +1,86 @@
 ---
-# cloudflare/playbook.yml
+# cloudflare_tunnel/playbook.yml
 # Propósito:
-# - Aplicar la configuración real del túnel de forma idempotente.
-# - Mantener la lógica declarativa en Ansible: instalación de paquetes, archivos y servicio systemd.
+# - Instalar cloudflared usando el paquete .deb oficial (sin repos APT) de forma idempotente.
+# - Configurar el túnel a nivel de sistema (system-wide) con servicio systemd de mínimo privilegio.
 #
 # Diseño:
-# - Nivel de servidor (system-wide): archivos en /etc/cloudflared y servicio en /etc/systemd/system/.
-# - Seguridad: la credencial del túnel (<UUID>.json) se guarda con permisos 0600.
+# - La descarga usa el canal "latest" de GitHub Releases y selecciona el .deb según arquitectura.
+# - La instalación se realiza con apt (parámetro deb), que resuelve dependencias si faltan.
+# - No se configuran repositorios APT ni se instalan llaves.
+#
+# Variables relevantes (pueden sobreescribirse vía --extra-vars):
+# - tunnel_name, hostname, service_url, enable_autostart
+# - cloudflared_bin (ruta al binario), cloudflared_conf_dir
+# - cloudflared_user, cloudflared_group
 
-- name: Cloudflare Tunnel (system-wide) 
+- name: Cloudflare Tunnel (system-wide)
   hosts: localhost
   connection: local
   gather_facts: true
   become: true
 
   vars:
+    # Entradas principales
     tunnel_name: "{{ tunnel_name | default(omit) }}"
     hostname: "{{ hostname | default(omit) }}"
     service_url: "{{ service_url | default(omit) }}"
     enable_autostart: "{{ enable_autostart | default(false) | bool }}"
+
+    # Rutas y usuario/grupo del servicio
     cloudflared_bin: "{{ cloudflared_bin | default('/usr/bin/cloudflared') }}"
     cloudflared_conf_dir: "{{ cloudflared_conf_dir | default('/etc/cloudflared') }}"
     cloudflared_user: "{{ cloudflared_user | default('cloudflared') }}"
     cloudflared_group: "{{ cloudflared_group | default(cloudflared_user) }}"
 
+    # Descarga del paquete .deb (mapeo de arquitecturas)
+    _deb_arch_map:
+      x86_64: amd64
+      amd64: amd64
+      aarch64: arm64
+      arm64: arm64
+      armv7l: armhf
+      armhf: armhf
+
   tasks:
-    # ------------------- Fase INSTALL -------------------
-    - name: Ensure base packages (incluye gnupg para dearmorar la llave)
+    # ------------------- Fase INSTALL (sin repos APT) -------------------
+    - name: Ensure base packages present (APT resolver y utilidades)
       tags: ["install"]
       apt:
         name:
           - ca-certificates
-          - lsb-release
-          - gnupg
+          - apt-transport-https
         state: present
         update_cache: yes
 
-    - name: Ensure /etc/apt/keyrings exists
+    - name: Resolve deb architecture from ansible_architecture
       tags: ["install"]
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+      set_fact:
+        deb_arch: "{{ _deb_arch_map.get(ansible_architecture, 'amd64') }}"
 
-    - name: Download Cloudflare repo key (ASCII armored)
+    - name: Compose download URL for cloudflared .deb (latest release)
+      tags: ["install"]
+      set_fact:
+        cloudflared_deb_url: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{{ deb_arch }}.deb"
+        cloudflared_deb_path: "/tmp/cloudflared-linux-{{ deb_arch }}.deb"
+
+    - name: Download cloudflared .deb for {{ deb_arch }}
       tags: ["install"]
       get_url:
-        url: https://pkg.cloudflare.com/cloudflare-main.gpg
-        dest: /etc/apt/keyrings/cloudflared.asc
+        url: "{{ cloudflared_deb_url }}"
+        dest: "{{ cloudflared_deb_path }}"
         mode: "0644"
+        # Si el archivo ya existe con el mismo tamaño/ETag, no marca cambio
+        force: false
+        timeout: 60
+      register: deb_download
 
-    - name: Convert key to GPG keyring (dearmor)
-      tags: ["install"]
-      command: gpg --dearmor -o /etc/apt/keyrings/cloudflared.gpg /etc/apt/keyrings/cloudflared.asc
-      args:
-        creates: /etc/apt/keyrings/cloudflared.gpg
-
-    - name: Add cloudflared deb822 repository with signed_by
-      tags: ["install"]
-      deb822_repository:
-        name: cloudflared
-        types: [deb]
-        uris: https://pkg.cloudflare.com/cloudflared
-        suites: "{{ ansible_distribution_release }}"
-        components: [main]
-        signed_by: /etc/apt/keyrings/cloudflared.gpg
-        enabled: true
-        state: present
-
-    - name: Update APT cache after adding repo
+    - name: Install cloudflared from local .deb via apt
       tags: ["install"]
       apt:
-        update_cache: yes
-
-    - name: Install cloudflared
-      tags: ["install"]
-      apt:
-        name: cloudflared
+        deb: "{{ cloudflared_deb_path }}"
         state: present
+      register: deb_installed
 
     - name: Ensure {{ cloudflared_conf_dir }} exists
       tags: ["install","configure"]
@@ -100,7 +101,7 @@
           - service_url is defined
         fail_msg: "Faltan variables requeridas: tunnel_name, hostname, service_url."
 
-    - name: Ensure service user/group exist
+    - name: Ensure service user/group exist (least privilege)
       tags: ["configure"]
       user:
         name: "{{ cloudflared_user }}"
@@ -120,7 +121,7 @@
       command: "{{ cloudflared_bin }} tunnel create {{ tunnel_name }}"
       when: tunnel_info.rc != 0
       register: tunnel_create
-      changed_when: "'Created tunnel' in (tunnel_create.stdout | default('') + tunnel_create.stderr | default(''))"
+      changed_when: "'Created tunnel' in ((tunnel_create.stdout | default('')) + (tunnel_create.stderr | default('')))"
       no_log: true
 
     - name: Resolve tunnel UUID by name
@@ -138,7 +139,7 @@
       assert:
         that:
           - tunnel_id_cmd.stdout is match("^[0-9a-fA-F-]+$")
-        fail_msg: "No se pudo resolver el UUID del túnel '{{ tunnel_name }}'. Verifica el login y la creación."
+        fail_msg: "No se pudo resolver el UUID del túnel '{{ tunnel_name }}'. Ejecuta primero 'cloudflared tunnel login' en este host."
 
     - name: Install tunnel credentials into {{ cloudflared_conf_dir }} (secure)
       tags: ["configure"]
@@ -200,5 +201,5 @@
       tags: ["configure"]
       command: "{{ cloudflared_bin }} tunnel route dns {{ tunnel_name }} {{ hostname }}"
       register: dns_route
-      changed_when: "'already exists' not in (dns_route.stdout | default('')) and 'already exists' not in (dns_route.stderr | default(''))"
-      failed_when: "dns_route.rc != 0 and ('already exists' not in (dns_route.stdout | default('')) and 'already exists' not in (dns_route.stderr | default('')))"
+      changed_when: "'already exists' not in ((dns_route.stdout | default('')) + (dns_route.stderr | default('')))"
+      failed_when: "dns_route.rc != 0 and ('already exists' not in ((dns_route.stdout | default('')) + (dns_route.stderr | default(''))))"
