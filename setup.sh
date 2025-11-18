@@ -52,10 +52,10 @@ main_menu() {
   read -rp "Opción: " opt
   case "$opt" in
     1)
-      if [[ -x "./cloudflare/setup.sh" ]]; then
-        exec ./cloudflare/setup.sh
+      if [[ -x "./cloudflare_tunnel/setup.sh" ]]; then
+        exec ./cloudflare_tunnel/setup.sh
       else
-        echo "No se encontró ./cloudflare/setup.sh o no es ejecutable."
+        echo "No se encontró ./cloudflare_tunnel/setup.sh o no es ejecutable."
         exit 1
       fi
       ;;

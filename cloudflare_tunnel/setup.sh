@@ -22,7 +22,7 @@ set -euo pipefail
 require_root() {
   # Este módulo instala paquetes y configura systemd: requiere root.
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    echo "Este script debe ejecutarse como root. Usa: sudo ./cloudflare/setup.sh"
+    echo "Este script debe ejecutarse como root. Usa: sudo ./cloudflare_tunnel/setup.sh"
     exit 1
   fi
 }
