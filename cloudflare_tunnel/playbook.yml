@@ -8,8 +8,7 @@
 # - Nivel de servidor (system-wide): archivos en /etc/cloudflared y servicio en /etc/systemd/system/.
 # - Seguridad: la credencial del túnel (<UUID>.json) se guarda con permisos 0600.
 
----
-- name: Cloudflare Tunnel (system-wide)
+- name: Cloudflare Tunnel (system-wide) 
   hosts: localhost
   connection: local
   gather_facts: true
