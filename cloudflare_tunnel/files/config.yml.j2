@@ -1,0 +1,17 @@
+# /etc/cloudflared/config.yml (plantilla)
+# Propósito:
+# - Indicar a cloudflared qué túnel ejecutar, dónde está su credencial
+#   y cómo enrutar el tráfico (ingress).
+#
+# Notas:
+# - 'tunnel' es el UUID del túnel.
+# - 'credentials-file' apunta al JSON seguro con la credencial del túnel.
+# - En 'ingress' se define qué hostname público apuntará a qué servicio local.
+
+tunnel: {{ tunnel_id }}
+credentials-file: {{ cloudflared_conf_dir }}/{{ tunnel_id }}.json
+
+ingress:
+  - hostname: {{ cfg_hostname }}
+    service: {{ cfg_service_url }}
+  - service: http_status:404

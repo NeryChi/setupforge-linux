@@ -1,0 +1,31 @@
+# /etc/systemd/system/cloudflared.service (plantilla)
+# Propósito:
+# - Definir el servicio de sistema que ejecuta el túnel de Cloudflare al inicio
+#   (si está habilitado) y mantiene el proceso en ejecución.
+#
+# Notas:
+# - --no-autoupdate para evitar cambios fuera de control en entornos de servidor.
+# - WorkingDirectory apunta al directorio de config para facilitar paths relativos.
+# - Restart=on-failure para reintentos automáticos si el proceso falla.
+
+[Unit]
+Description=Cloudflare Tunnel (system, least-privilege)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ cloudflared_user }}
+Group={{ cloudflared_group }}
+Type=simple
+Environment=NO_UPDATE_NOTIFIER=true
+ExecStart={{ cloudflared_bin }} --no-autoupdate tunnel run --config {{ cloudflared_conf_dir }}/config.yml
+WorkingDirectory={{ cloudflared_conf_dir }}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
